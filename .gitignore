@@ -1,0 +1,12 @@
+# .gitignore — 비밀 값이 든 파일은 절대 올리지 않는다
+include/config.h
+src/config.h
+
+# PlatformIO / 편집기 산출물
+.pio/
+.pioenvs/
+.piolibdeps/
+.vscode/
+*.bin
+*.elf
+.DS_Store
