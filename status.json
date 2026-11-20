@@ -1,28 +1,28 @@
 {
-  "updated": "11-20 15:49",
-  "note": "금요일 오후 · 코스피 -5.21% 급락 마감",
+  "updated": "11-21 06:46",
+  "note": "토요일 아침 · 뉴욕 기술주 폭락, 반도체 약세",
   "weather": {
     "city": "부천",
     "condition": "맑음",
-    "temp": 3,
+    "temp": -4,
     "high": 3,
-    "low": -3,
-    "humidity": 43,
+    "low": -4,
+    "humidity": 54,
     "air": "좋음"
   },
   "markets": [
     {
       "symbol": "005930",
       "name": "삼성전자",
-      "price": 183100,
-      "change": -7.01,
+      "price": 180900,
+      "change": -8.13,
       "currency": "KRW"
     },
     {
       "symbol": "XRP",
       "name": "리플 XRP",
-      "price": 0.9695,
-      "change": 0.09,
+      "price": 0.9069,
+      "change": -4.99,
       "currency": "USD"
     },
     {
