@@ -1,13 +1,13 @@
 {
-  "updated": "11-21 06:46",
-  "note": "토요일 아침 · 뉴욕 기술주 폭락, 반도체 약세",
+  "updated": "11-22 06:56",
+  "note": "일요일 아침 · 뉴욕 AI주 급락 마감, 반도체 약세",
   "weather": {
     "city": "부천",
     "condition": "맑음",
-    "temp": -4,
-    "high": 3,
-    "low": -4,
-    "humidity": 54,
+    "temp": -5,
+    "high": 5,
+    "low": -5,
+    "humidity": 63,
     "air": "좋음"
   },
   "markets": [
@@ -21,8 +21,8 @@
     {
       "symbol": "XRP",
       "name": "리플 XRP",
-      "price": 0.9069,
-      "change": -4.99,
+      "price": 0.9289,
+      "change": 2.39,
       "currency": "USD"
     },
     {
