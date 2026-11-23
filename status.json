@@ -1,35 +1,35 @@
 {
-  "updated": "11-23 06:47",
-  "note": "월요일 아침 · 뉴욕 반도체 급락 여파, 개장 변동성 주의",
+  "updated": "11-24 06:46",
+  "note": "화요일 아침 · 간밤 미 반도체 급반등, 개장 갭업 주목",
   "weather": {
     "city": "부천",
-    "condition": "비",
-    "temp": 2,
-    "high": 13,
-    "low": 0,
-    "humidity": 77,
-    "air": "좋음"
+    "condition": "맑음",
+    "temp": -1,
+    "high": 5,
+    "low": -2,
+    "humidity": 61,
+    "air": "보통"
   },
   "markets": [
     {
       "symbol": "005930",
       "name": "삼성전자",
-      "price": 180900,
-      "change": -8.13,
+      "price": 177500,
+      "change": -3.06,
       "currency": "KRW"
     },
     {
       "symbol": "XRP",
       "name": "리플 XRP",
-      "price": 0.9262,
-      "change": -0.27,
+      "price": 0.9409,
+      "change": 1.61,
       "currency": "USD"
     },
     {
       "symbol": "0005A0",
       "name": "KODEX S&P500 OTM",
-      "price": 8215,
-      "change": -2.95,
+      "price": 8175,
+      "change": -0.49,
       "currency": "KRW"
     }
   ]
