@@ -5,14 +5,23 @@
 //  사용법:
 //    1) 이 파일을 같은 폴더의 config.h 로 복사한다.
 //         cp include/config.example.h include/config.h   (Windows: copy)
-//    2) 아래 WIFI_SSID / WIFI_PASSWORD / GEMINI_API_KEY 를 채운다.
+//    2) GEMINI_API_KEY 를 채운다. (3페이지 음성 질문을 쓸 때만)
+//       Wi-Fi 는 휴대폰에서 설정하므로 비워 두어도 된다(아래 설명).
 //    3) config.h 는 .gitignore 에 들어 있어 GitHub에 올라가지 않는다.
 //       (비밀번호·API 키를 절대 커밋하지 마세요)
 // ---------------------------------------------------------------------------
 
 // -------- Wi-Fi (2.4GHz만 지원) --------
-#define WIFI_SSID     "YOUR_WIFI_SSID"
-#define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
+// 권장: 휴대폰에서 설정한다.
+//   1) 기기를 켜면 Wi-Fi 가 없을 때/연결에 실패할 때 AP "StickS3-Setup" 가 열린다.
+//   2) 휴대폰 Wi-Fi 에서 StickS3-Setup 에 접속 → http://192.168.4.1
+//   3) 주변 Wi-Fi 를 고르고 비밀번호를 넣으면 기기에 저장(NVS)되고 재시작한다.
+//   나중에 바꿀 때는 B 버튼을 3초 길게 누른다.
+//
+// 아래 두 줄은 "예비" 값이다. 휴대폰에서 저장한 값이 없을 때만 쓰인다.
+// 비워 두면 첫 부팅 때 자동으로 휴대폰 설정 화면이 뜬다.
+#define WIFI_SSID     ""
+#define WIFI_PASSWORD ""
 
 // -------- GitHub에 올린 status.json --------
 // 저장소를 포크했거나 파일 위치가 다르면 이 주소만 바꾸면 된다.

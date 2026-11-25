@@ -5,6 +5,8 @@ M5Stack **StickS3**(ESP32-S3-PICO-1-N8R8, 1.14" 135×240 LCD) 한 대로 만드�
 3페이지에서는 **버튼 한 번으로 말해서 Gemini 무료 등급에 물어보는 음성 Q&A**를 쓸 수 있습니다.
 
 - 시세/날씨를 고치려면 **GitHub에서 `status.json`만 편집**하면 됩니다. 기기를 다시 굽지 않아도 5분 안에 반영됩니다.
+- **Wi-Fi 는 휴대폰에서 설정**합니다. 기기를 켜면 `StickS3-Setup` 이라는 AP 가 열리고, 폰으로 접속해 집 Wi-Fi 를 고르면 끝입니다.
+  코드에 비밀번호를 넣고 다시 굽는 일이 없습니다.
 - 공개 저장소의 `status.json`을 HTTPS로 그냥 읽으므로 **기기에 GitHub 토큰을 넣지 않습니다.**
 - Gemini는 **무료 등급**(신용카드 등록 불필요)만 사용합니다.
 
@@ -40,21 +42,24 @@ cd sticks-monitor
 cp include/config.example.h include/config.h      # Windows: copy
 ```
 
-`include/config.h`를 열어 두 곳만 채우면 됩니다.
+`include/config.h`에서 **`GEMINI_API_KEY` 하나만** 채우면 됩니다(3페이지 음성 질문을 쓸 때).
 
 ```c
-#define WIFI_SSID     "우리집공유기"
-#define WIFI_PASSWORD "비밀번호"
 #define GEMINI_API_KEY "AIza...에서 시작하는 키"   // 3페이지를 안 쓰면 비워도 됨
 ```
 
-> `config.h`는 `.gitignore`에 들어 있습니다. Wi-Fi 비밀번호와 API 키가 GitHub에 올라가지 않습니다.
+> **Wi-Fi 는 여기 적지 않아도 됩니다.** 바로 아래 4장처럼 휴대폰에서 설정합니다.
+> 예전처럼 코드에 직접 넣고 싶으면 `WIFI_SSID` / `WIFI_PASSWORD`를 채워도 되고,
+> 이 값은 **휴대폰에서 저장한 값이 없을 때만** 쓰이는 예비 값입니다.
+
+> `config.h`는 `.gitignore`에 들어 있습니다. API 키(와 혹시 넣었다면 Wi-Fi 비밀번호)가 GitHub에 올라가지 않습니다.
 > 절대 `config.example.h`에 실제 값을 적어 커밋하지 마세요.
 
 주요 설정 항목
 
 | 매크로 | 기본값 | 설명 |
 | --- | --- | --- |
+| `WIFI_SSID` / `WIFI_PASSWORD` | 비어 있음 | **예비 값.** 보통은 휴대폰에서 설정한다(4장). 휴대폰 저장값이 없을 때만 쓰임 |
 | `STATUS_URL` | 이 저장소의 `status.json` | 다른 곳에 파일을 두면 주소만 바꾼다 |
 | `STATUS_REFRESH_MS` | 300000 (5분) | 새로 받는 주기 |
 | `DISPLAY_ROTATION` | 1 | 화면이 거꾸로 보이면 3으로 |
@@ -63,7 +68,26 @@ cp include/config.example.h include/config.h      # Windows: copy
 | `GEMINI_RECORD_SEC` | 5 | 한 번에 녹음하는 길이(초) |
 | `GEMINI_ENABLED` | 1 | 0이면 Gemini 페이지를 숨긴다 |
 
-## 4. 빌드와 업로드
+## 4. Wi-Fi 설정 (휴대폰에서)
+
+기기에 Wi-Fi 를 넣지 않아도 됩니다. 켜면 설정 화면이 뜨고, 휴대폰으로 붙여서 고르면 끝입니다.
+
+1. 기기 전원을 켭니다. 저장된 Wi-Fi 가 없거나 연결에 실패하면(약 15초) 화면에 **`Wi-Fi 설정`** 안내가 뜨고
+   AP **`StickS3-Setup`** 이 열립니다.
+2. 휴대폰의 **Wi-Fi 설정**에서 **`StickS3-Setup`** 에 접속합니다(비밀번호 없음).
+3. 설정 페이지가 자동으로 열립니다. 안 열리면 브라우저 주소창에 **`http://192.168.4.1`** 을 입력합니다.
+4. 목록에서 집 Wi-Fi(**2.4GHz**)를 누르고 비밀번호를 넣은 뒤 **저장하고 연결**.
+5. 기기가 재시작하며 그 Wi-Fi 에 붙습니다. 10~20초 뒤 화면이 정상 페이지로 바뀝니다.
+
+- 비밀번호가 틀리면 다시 `StickS3-Setup` 이 뜹니다. 그때 다시 설정하면 됩니다.
+- 한 번 저장하면 다음부터는 켜자마자 자동으로 붙습니다. 값은 기기 내부 플래시(NVS)에만 저장되고 GitHub에 올라가지 않습니다.
+- **다른 Wi-Fi 로 바꿀 때**: 아무 페이지에서나 **B 버튼을 3초 이상 길게** 누릅니다(녹음·전송 중에는 동작하지 않음). 다시 설정 화면이 뜹니다.
+- 저장된 값을 지우려면 설정 페이지 맨 아래 **저장된 설정 지우기** 를 누릅니다.
+- 우선순위: **휴대폰에서 저장한 값 > `include/config.h`** 의 예비 값.
+- AP 는 설정하는 동안에만 열리고, 비밀번호 없는 개방 AP 입니다. Wi-Fi 이름·비밀번호를 넣는 화면만 제공하며,
+  저장하면 자동으로 재시작해 AP 가 닫힙니다.
+
+## 5. 빌드와 업로드
 
 ```bash
 pio run              # 빌드만
@@ -76,12 +100,13 @@ VS Code에서는 하단 상태바의 **→(Upload)** 버튼을 누르면 됩니�
 **업로드가 안 될 때(다운로드 모드)**: StickS3를 USB로 연결한 뒤 **전원 버튼을 길게 눌러 초록 LED가 깜빡이면 놓습니다.**
 그 상태에서 다시 `pio run -t upload`를 실행하세요. 업로드가 끝나면 자동으로 재시작됩니다.
 
-## 5. 사용법
+## 6. 사용법
 
 | 버튼 | 1·2페이지 | 3페이지 |
 | --- | --- | --- |
 | **A** (작은 버튼, GPIO11) | 다음 페이지 | 다음 페이지 |
 | **B** (작은 버튼, GPIO12) | `status.json` 즉시 새로고침 | **눌러서 말하기** / 녹음 중이면 그만 |
+| **B 3초 길게** | Wi-Fi 설정 모드(AP) | Wi-Fi 설정 모드(AP) — 녹음·전송 중에는 무시 |
 
 - 전원 버튼: 한 번 누르면 켜기/리셋, 두 번 누르면 끄기.
 - **1페이지**: 도시, 현재 기온(큰 글씨), 날씨 상태, 최고/최저, 습도, 미세먼지 등급, 그리고 `note` 한 줄.
@@ -90,7 +115,7 @@ VS Code에서는 하단 상태바의 **→(Upload)** 버튼을 누르면 됩니�
   답이 길면 2.5초마다 자동으로 넘어갑니다. 다시 묻고 싶으면 B를 한 번 더 누르세요.
 - 오른쪽 위에 배터리 잔량(%)과 아이콘이 항상 표시됩니다.
 
-## 6. status.json 갱신하기
+## 7. status.json 갱신하기
 
 기기에서 읽는 파일은 **`https://raw.githubusercontent.com/icejung/sticks-monitor/main/status.json`** 하나입니다.
 GitHub 웹에서 이 파일을 열어 **연필 아이콘(Edit)** → 값 수정 → Commit 하면 5분 안에 기기에 반영됩니다.
@@ -132,7 +157,7 @@ GitHub 웹에서 이 파일을 열어 **연필 아이콘(Edit)** → 값 수정 
 > ⚠️ **이 저장소는 공개입니다.** `status.json`에는 날씨·시세 같은 공개 정보만 넣으세요.
 > 실명, 주소, 전화번호, 계좌번호, 사내 정보, 개인 메일 주소 같은 내용은 절대 넣지 마세요.
 
-## 7. Gemini 무료 API 키 받기
+## 8. Gemini 무료 API 키 받기
 
 1. <https://aistudio.google.com> 접속 → 구글 계정으로 로그인
 2. 왼쪽/상단의 **Get API key** (또는 API Keys) → **Create API key** → 프로젝트 선택 후 생성
@@ -161,10 +186,15 @@ GitHub 웹에서 이 파일을 열어 **연필 아이콘(Edit)** → 값 수정 
 > ES8311은 스피커와 마이크를 동시에 쓸 수 없습니다. 그래서 녹음 전에 `M5.Speaker.end()`를 호출하고,
 > 마이크 예열(약 1.2초, 이 시간 동안 샘플이 0으로 들어올 수 있음) 뒤에 녹음을 시작합니다.
 
-## 8. 문제 해결
+## 9. 문제 해결
 
 | 증상 | 확인할 것 |
 | --- | --- |
+| 화면에 `Wi-Fi 설정` / AP `StickS3-Setup` 이 뜬다 | 저장된 Wi-Fi 가 없거나 연결 실패. 폰으로 4장 설정을 하면 된다 |
+| 화면 아래 `B 길게: Wi-Fi 설정` | Wi-Fi 가 끊긴 상태. B 를 3초 눌러 다시 설정 |
+| 휴대폰에서 설정 페이지가 안 열린다 | 주소창에 `http://192.168.4.1` 직접 입력. 셀룰러 데이터를 잠시 끄면 확실하다 |
+| 목록에 우리 집 Wi-Fi 가 없다 | 2.4GHz 인지 확인(5GHz 는 ESP32-S3 이 못 잡음). 공유기에서 2.4GHz 를 켜 둔다 |
+| 저장했는데 또 `StickS3-Setup` 이 뜬다 | 비밀번호 오타, 공유기 MAC 필터, SSID 숨김. 다시 설정 |
 | 화면이 거꾸로 | `DISPLAY_ROTATION`을 `3`으로 |
 | `Wi-Fi 연결 실패` | 2.4GHz SSID인지, 비밀번호 오타, 공유기 MAC 필터 |
 | 1페이지에 `status.json HTTP 404` | 저장소 이름/브랜치가 `main`인지, 파일 이름이 `status.json`인지 |
@@ -175,17 +205,17 @@ GitHub 웹에서 이 파일을 열어 **연필 아이콘(Edit)** → 값 수정 
 | 마이크가 무음 | 마이크 구멍을 가리지 않았는지, 예열 시간(`GEMINI_MIC_WARMUP_MS`)을 늘려 보기 |
 | 업로드 실패 | 전원 버튼 길게 눌러 초록 LED 깜빡임 = 다운로드 모드에서 재시도 |
 
-## 9. 파일 구조
+## 10. 파일 구조
 
 ```
 platformio.ini              # StickS3용 빌드 설정 (8MB Flash / OPI PSRAM)
 include/config.example.h    # 설정 템플릿 → config.h 로 복사
-src/main.cpp                # 화면·status.json·Gemini 전체 구현
+src/main.cpp                # 화면·status.json·Gemini·Wi-Fi 설정 포털 전체 구현
 status.json                 # 기기가 읽는 데이터 (공개 정보만)
 README.md
 ```
 
-## 10. 참고
+## 11. 참고
 
 - M5Stack StickS3 공식 문서(핀맵·PlatformIO 설정): <https://docs.m5stack.com/en/core/StickS3>
 - M5Unified / M5GFX: <https://github.com/m5stack/M5Unified> · <https://github.com/m5stack/M5GFX>

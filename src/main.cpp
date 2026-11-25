@@ -10,18 +10,28 @@
 //            버튼 A = GPIO11, 버튼 B = GPIO12, 250mAh 배터리(M5PM1 PMIC)
 //
 //  버튼
-//    A (짧게) : 다음 페이지
-//    B (짧게) : 1·2페이지 = status.json 새로고침 / 3페이지 = 녹음 시작·중지
+//    A (짧게)   : 다음 페이지
+//    B (짧게)   : 1·2페이지 = status.json 새로고침 / 3페이지 = 녹음 시작·중지
+//    B (3초 길게): Wi-Fi 설정 모드 (AP "StickS3-Setup" + 192.168.4.1)
+//
+//  Wi-Fi 설정
+//    - 휴대폰에서 저장한 값(Preferences/NVS)을 먼저 쓰고, 없으면 config.h 값을 쓴다.
+//    - 저장된 값이 없거나 연결에 실패하면 자동으로 AP + 캡티브 포털을 연다.
+//    - 포털에서 SSID/비밀번호를 저장하면 기기가 재시작하며 새 Wi-Fi 로 붙는다.
 // ---------------------------------------------------------------------------
 
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
+#include <WebServer.h>
+#include <DNSServer.h>
+#include <Preferences.h>
 #include <ArduinoJson.h>
 #include <M5Unified.h>
 #include <esp_heap_caps.h>
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -35,6 +45,14 @@ using namespace lgfx::textdatum;
 #endif
 
 // ----- 설정 기본값 (config.h 에서 덮어쓸 수 있음) -----
+// Wi-Fi 는 휴대폰 설정(NVS)이 우선이고, 여기 값은 예비(fallback)일 뿐이다.
+// 비워 두면 첫 부팅 때 자동으로 휴대폰 설정 화면(AP)이 뜬다.
+#ifndef WIFI_SSID
+  #define WIFI_SSID ""
+#endif
+#ifndef WIFI_PASSWORD
+  #define WIFI_PASSWORD ""
+#endif
 #ifndef STATUS_URL
   #define STATUS_URL "https://raw.githubusercontent.com/icejung/sticks-monitor/main/status.json"
 #endif
@@ -459,6 +477,9 @@ static void draw() {
       hint = (g_gem.state == G_REC) ? "B 그만    A 다음" : "B 말하기    A 다음";
       break;
   }
+  // Wi-Fi 가 죽어 있으면 버튼 안내를 설정 모드 안내로 바꾼다
+  if (!g_data.valid && g_data.error.indexOf("Wi-Fi") >= 0) hint = "B 길게: Wi-Fi 설정";
+
   drawFooter(hint);
   g_ui->endWrite();
   if (g_spriteOk) { g_spr.pushSprite(0, 0); }
@@ -468,7 +489,7 @@ static void draw() {
 }
 
 // ---------------------------------------------------------------------------
-//  Wi-Fi
+//  부팅 화면
 // ---------------------------------------------------------------------------
 static void bootScreen(const char* msg) {
   g_ui->startWrite();
@@ -479,30 +500,419 @@ static void bootScreen(const char* msg) {
   if (g_spriteOk) { g_spr.pushSprite(0, 0); }
 }
 
-static bool wifiConnect(uint32_t timeoutMs = 25000) {
+// ---------------------------------------------------------------------------
+//  Wi-Fi 자격증명 — 휴대폰에서 저장한 NVS 값이 우선, config.h 는 예비
+// ---------------------------------------------------------------------------
+static constexpr const char* WIFI_NVS_NS      = "wifi";
+static constexpr uint32_t    WIFI_BOOT_TIMEOUT = 15000;   // 이 시간 안에 못 붙으면 설정 모드
+
+static String g_ssid;        // 지금 쓰는 SSID (루프에서 재연결에도 사용)
+static String g_pass;
+
+static bool isPlaceholder(const char* s) {
+  return !s || !*s || sameText(s, "YOUR_WIFI_SSID") || sameText(s, "YOUR_WIFI_PASSWORD");
+}
+
+static bool loadSavedWifi(String& ssid, String& pass) {
+  Preferences prefs;
+  if (!prefs.begin(WIFI_NVS_NS, true)) return false;      // 읽기 전용
+  ssid = prefs.getString("ssid", "");
+  pass = prefs.getString("pass", "");
+  prefs.end();
+  ssid.trim();
+  return ssid.length() > 0;
+}
+
+static void storeWifi(const String& ssid, const String& pass) {
+  Preferences prefs;
+  if (!prefs.begin(WIFI_NVS_NS, false)) return;
+  prefs.putString("ssid", ssid);
+  prefs.putString("pass", pass);
+  prefs.end();
+}
+
+static void clearStoredWifi() {
+  Preferences prefs;
+  if (!prefs.begin(WIFI_NVS_NS, false)) return;
+  prefs.clear();
+  prefs.end();
+}
+
+// 우선순위: 휴대폰 설정(NVS) > config.h 기본값
+static bool resolveWifi() {
+  String ssid, pass;
+  if (loadSavedWifi(ssid, pass)) { g_ssid = ssid; g_pass = pass; return true; }
+  if (!isPlaceholder(WIFI_SSID)) { g_ssid = WIFI_SSID; g_pass = WIFI_PASSWORD; return true; }
+  g_ssid = "";
+  g_pass = "";
+  return false;
+}
+
+static bool wifiConnect(uint32_t timeoutMs = WIFI_BOOT_TIMEOUT) {
   if (WiFi.status() == WL_CONNECTED) return true;
+  if (!g_ssid.length() && !resolveWifi()) {
+    g_data.error = "Wi-Fi 미설정 (B 길게)";
+    return false;
+  }
 
   bootScreen("Wi-Fi 연결 중…");
+  WiFi.persistent(false);        // 자격증명은 우리가 직접 NVS 에 보관한다
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);          // TLS 중 지연/끊김 방지
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(g_ssid.c_str(), g_pass.c_str());
 
   uint32_t t0 = millis();
-  int dots = 0;
+  int tick = 0;
   while (WiFi.status() != WL_CONNECTED && millis() - t0 < timeoutMs) {
-    delay(300);
-    if (++dots % 4 == 0) {
-      char b[32];
-      snprintf(b, sizeof(b), "Wi-Fi 연결 중%.*s", dots % 16, "..........");
-      putText(b, 6, H / 2 - 8, C_FG, &fonts::efontKR_12);
+    delay(250);
+    if (++tick % 4 == 0) {
+      char b[48];
+      snprintf(b, sizeof(b), "Wi-Fi 연결 중%.*s", (tick / 4) % 12, "..........");
+      bootScreen(b);
     }
   }
   if (WiFi.status() != WL_CONNECTED) {
-    bootScreen("Wi-Fi 연결 실패");
-    delay(800);
+    WiFi.disconnect(false, false);
+    g_data.error = "Wi-Fi 연결 실패";
     return false;
   }
+  Serial.printf("[wifi] %s 연결됨, IP %s\n", g_ssid.c_str(), WiFi.localIP().toString().c_str());
   return true;
+}
+
+// ---------------------------------------------------------------------------
+//  휴대폰 Wi-Fi 설정 (SoftAP + Captive Portal)
+//    AP 이름 : StickS3-Setup (개방)
+//    주소    : http://192.168.4.1
+//    진입    : 자격증명 없음/연결 실패 시 자동, 또는 B 를 3초 길게
+// ---------------------------------------------------------------------------
+static constexpr const char* AP_SSID = "StickS3-Setup";
+static const IPAddress AP_IP(192, 168, 4, 1);
+static const IPAddress AP_MASK(255, 255, 255, 0);
+
+static WebServer g_http(80);
+static DNSServer g_dns;
+
+static int      g_apClients  = -1;    // 붙은 휴대폰 수 (바뀌면 화면 갱신)
+static bool     g_apScanning = false;
+static bool     g_apPosting  = false; // 설정 저장 후 재시작 대기
+static String   g_apSavedSsid;
+static uint32_t g_apNextDraw = 0;
+
+// ---------- 포털 화면에 넣을 값 이스케이프 ----------
+static String htmlEscape(const String& in) {
+  String out;
+  out.reserve(in.length() + 8);
+  for (size_t i = 0; i < in.length(); ++i) {
+    char c = in[i];
+    switch (c) {
+      case '&':  out += "&amp;";  break;
+      case '<':  out += "&lt;";   break;
+      case '>':  out += "&gt;";   break;
+      case '"': out += "&quot;"; break;
+      case '\'': out += "&#39;";  break;
+      default:   out += c;
+    }
+  }
+  return out;
+}
+
+// ---------- 주변 Wi-Fi 스캔 → JSON ----------
+struct ApNet {
+  String ssid;
+  int    rssi;
+  bool   enc;
+};
+
+static String scanNetworksJson() {
+  std::vector<ApNet> nets;
+  int n = WiFi.scanNetworks(false, true, false, 120);   // 동기 스캔, 숨김 SSID 포함
+  if (n > 0) {
+    nets.reserve(n);
+    for (int i = 0; i < n; ++i) {
+      String s = WiFi.SSID(i);
+      if (!s.length()) continue;
+      nets.push_back({s, (int)WiFi.RSSI(i), WiFi.encryptionType(i) != WIFI_AUTH_OPEN});
+    }
+  }
+  WiFi.scanDelete();
+
+  // 세기 순으로 정렬하고 같은 SSID 는 가장 센 것만 남긴다
+  std::sort(nets.begin(), nets.end(),
+            [](const ApNet& a, const ApNet& b) { return a.rssi > b.rssi; });
+
+  JsonDocument doc;
+  JsonArray arr = doc["nets"].to<JsonArray>();
+  std::vector<String> seen;
+  for (const ApNet& net : nets) {
+    bool dup = false;
+    for (const String& s : seen) if (s == net.ssid) { dup = true; break; }
+    if (dup) continue;
+    seen.push_back(net.ssid);
+    JsonObject o = arr.add<JsonObject>();
+    o["s"] = net.ssid;
+    o["r"] = net.rssi;
+    o["e"] = net.enc;
+  }
+  doc["err"] = (n < 0);
+
+  String out;
+  serializeJson(doc, out);
+  return out;
+}
+
+// ---------- 240x135 설정 안내 화면 ----------
+static void drawApSetup() {
+  g_ui->startWrite();
+  g_ui->fillScreen(C_BG);
+  g_ui->fillRect(0, 0, W, HEADER_H, C_PANEL);
+  putText(g_apPosting ? "Wi-Fi 저장됨" : "Wi-Fi 설정", 4, 3, C_ACCENT, &fonts::efontKR_12);
+
+  int lv = batteryLevel();
+  if (lv >= 0) {
+    char b[8];
+    snprintf(b, sizeof(b), "%d%%", lv);
+    putText(b, W - 30, 4, C_DIM, &fonts::efontKR_10, top_right);
+  }
+  drawBatteryIcon(W - 26, 5, lv, M5.Power.isCharging());
+
+  putText("AP: StickS3-Setup", 4, BODY_TOP, C_FG, &fonts::efontKR_16);
+
+  putText("1) 휴대폰 Wi-Fi 목록에서", 6, BODY_TOP + 24, C_DIM, &fonts::efontKR_10);
+  putText("   이 이름에 접속", 6, BODY_TOP + 36, C_DIM, &fonts::efontKR_10);
+  putText("2) 브라우저 주소창에", 6, BODY_TOP + 52, C_DIM, &fonts::efontKR_10);
+  putText("192.168.4.1", W - 6, BODY_TOP + 48, C_ACCENT, &fonts::efontKR_16, top_right);
+
+  // 상태 줄
+  String status;
+  uint16_t col = C_WARN;
+  if (g_apPosting) {
+    status = g_apSavedSsid + " 로 재시작 중…";
+    col = C_OK;
+  } else if (g_apScanning) {
+    status = "주변 Wi-Fi 검색 중…";
+    col = C_ACCENT;
+  } else if (g_apClients > 0) {
+    status = "휴대폰 연결됨 · 192.168.4.1";
+    col = C_OK;
+  } else {
+    status = "휴대폰을 StickS3-Setup 에 연결";
+  }
+  putText(status.c_str(), 6, H - FOOTER_H - 2, col, &fonts::efontKR_10);
+
+  g_ui->endWrite();
+  if (g_spriteOk) { g_spr.pushSprite(0, 0); }
+}
+
+// ---------- 포털 페이지 ----------
+static const char AP_PAGE[] PROGMEM = R"HTML(<!doctype html>
+<html lang="ko"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b0f14">
+<title>StickS3 Wi-Fi 설정</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;padding:18px 16px 44px;background:#0b0f14;color:#e8eef5;
+ font:16px/1.45 -apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Malgun Gothic","Noto Sans KR",sans-serif}
+h1{margin:0 0 6px;font-size:20px}
+.sub{margin:0 0 14px;color:#9fb0c3;font-size:14px}
+.sub b{color:#5ee7ff}
+.card{background:#141c26;border:1px solid #22303f;border-radius:14px;padding:12px;margin:0 0 14px}
+.card h2{margin:0 0 8px;font-size:13px;color:#9fb0c3;font-weight:600;letter-spacing:.02em}
+ul{list-style:none;margin:0;padding:0;max-height:44vh;overflow:auto}
+li.net{display:flex;align-items:center;gap:10px;padding:12px 10px;border-radius:10px;cursor:pointer}
+li.net:active{background:#1d2836}
+li.net .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+li.net .sig{color:#5ee7ff;font-size:12px;letter-spacing:1px}
+li.net .lk{font-size:13px;opacity:.7}
+li.dim{color:#7e8fa3;padding:12px 10px;font-size:14px}
+button{width:100%;padding:14px;border-radius:12px;border:0;background:#1f7ae0;color:#fff;font-size:16px;font-weight:600}
+button.ghost{background:transparent;border:1px solid #33465c;color:#9fb0c3;font-size:14px;padding:12px}
+button.scan{background:#1a2634;color:#cfe3f5;font-size:14px;padding:11px;margin:10px 0 0}
+label{display:block;margin:12px 0 0;font-size:13px;color:#9fb0c3}
+input[type=text],input[type=password]{width:100%;margin-top:6px;padding:13px 12px;font-size:16px;border-radius:12px;
+ border:1px solid #2b3d51;background:#0f1620;color:#e8eef5}
+input:focus{outline:2px solid #1f7ae0;border-color:#1f7ae0}
+.chk{display:flex;align-items:center;gap:8px;font-size:13px;color:#9fb0c3;margin-top:10px}
+.chk input{width:auto;margin:0}
+.tip{font-size:12px;color:#7e8fa3;margin:8px 0 0}
+</style></head>
+<body>
+<h1>StickS3 Wi-Fi 설정</h1>
+<p class="sub">집 Wi-Fi(<b>2.4GHz</b>)를 고르고 비밀번호를 넣으면, 기기가 재시작하며 연결합니다.</p>
+<!--EXTRA-->
+<div class="card">
+  <h2>주변 Wi-Fi</h2>
+  <ul id="list"><li class="dim">찾는 중…</li></ul>
+  <button class="scan" type="button" onclick="scan()">다시 찾기</button>
+</div>
+<form class="card" method="POST" action="/save">
+  <h2>직접 입력</h2>
+  <label>SSID (네트워크 이름)
+    <input id="ssid" name="ssid" type="text" value="<!--SSIDVAL-->" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="예: iptime">
+  </label>
+  <label>비밀번호
+    <input id="pass" name="pass" type="password" autocomplete="off" placeholder="없으면 비워 두세요">
+  </label>
+  <label class="chk"><input type="checkbox" onchange="pw(this.checked)">비밀번호 보기</label>
+  <p class="tip">5GHz 네트워크는 목록에 나오지 않습니다. 기기는 2.4GHz만 잡습니다.</p>
+  <div style="margin-top:14px"><button type="submit">저장하고 연결</button></div>
+</form>
+<form method="POST" action="/forget" onsubmit="return confirm('저장된 Wi-Fi 설정을 지우고 재시작할까요?')">
+  <button class="ghost" type="submit">저장된 설정 지우기</button>
+</form>
+<script>
+function bars(r){if(r>=-55)return'▮▮▮▮';if(r>=-67)return'▮▮▮';if(r>=-78)return'▮▮';if(r>=-90)return'▮';return'·';}
+function esc(s){return s.replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+function pick(name){document.getElementById('ssid').value=name;
+  document.getElementById('ssid').scrollIntoView({behavior:'smooth',block:'center'});
+  setTimeout(function(){document.getElementById('pass').focus();},350);}
+function pw(v){document.getElementById('pass').type=v?'text':'password';}
+function scan(){
+  var ul=document.getElementById('list');
+  ul.innerHTML='<li class="dim">찾는 중… (2~5초)</li>';
+  fetch('/scan').then(function(r){return r.json();}).then(function(d){
+    var nets=(d&&d.nets)||[];
+    if(!nets.length){ul.innerHTML='<li class="dim">찾은 네트워크가 없습니다. 공유기 2.4GHz 설정을 확인하세요.</li>';return;}
+    ul.innerHTML='';
+    nets.forEach(function(n){
+      var li=document.createElement('li');li.className='net';
+      var lk=document.createElement('span');lk.className='lk';lk.textContent=n.e?'🔒':'';
+      var nm=document.createElement('span');nm.className='nm';nm.textContent=n.s;
+      var sg=document.createElement('span');sg.className='sig';sg.textContent=bars(n.r);
+      li.appendChild(lk);li.appendChild(nm);li.appendChild(sg);
+      li.onclick=function(){pick(n.s);};
+      ul.appendChild(li);
+    });
+  }).catch(function(){ul.innerHTML='<li class="dim">목록을 받지 못했습니다. 다시 찾기를 눌러 주세요.</li>';});
+}
+scan();
+</script>
+</body></html>)HTML";
+
+// ---------- 포털 핸들러 ----------
+static void apHandleRoot() {
+  String savedSsid, savedPass;
+  String extra;
+  if (loadSavedWifi(savedSsid, savedPass)) {
+    extra  = "<div class=\"card\"><h2>저장된 Wi-Fi</h2><p style=\"margin:0;font-size:15px\">";
+    extra += htmlEscape(savedSsid);
+    extra += "</p><p class=\"tip\">이 화면이 떴다면 연결에 실패한 것입니다. 비밀번호를 다시 확인해 주세요.</p></div>";
+  } else if (!isPlaceholder(WIFI_SSID)) {
+    extra  = "<div class=\"card\"><h2>config.h 기본값</h2><p style=\"margin:0;font-size:15px\">";
+    extra += htmlEscape(String(WIFI_SSID));
+    extra += "</p><p class=\"tip\">여기서 저장한 값이 다음부터 우선합니다.</p></div>";
+  }
+
+  String page = String(AP_PAGE);
+  page.replace("<!--EXTRA-->", extra);
+  page.replace("<!--SSIDVAL-->", htmlEscape(savedSsid));
+  g_http.send(200, "text/html; charset=utf-8", page);
+}
+
+static void apHandleScan() {
+  g_apScanning = true;
+  g_apNextDraw = 0;
+  drawApSetup();
+  String json = scanNetworksJson();
+  g_apScanning = false;
+  g_apNextDraw = 0;
+  g_http.send(200, "application/json; charset=utf-8", json);
+}
+
+static void apHandleSave() {
+  String ssid = g_http.arg("ssid");
+  String pass = g_http.arg("pass");
+  ssid.trim();
+  if (pass.length() > 63) pass = pass.substring(0, 63);
+
+  if (!ssid.length()) {
+    g_http.send(200, "text/html; charset=utf-8",
+                "<!doctype html><meta charset=\"utf-8\"><p>SSID 가 비어 있습니다. 뒤로 가서 다시 입력해 주세요.</p>");
+    return;
+  }
+
+  storeWifi(ssid, pass);
+  g_apSavedSsid = ssid;
+  g_apPosting = true;
+  g_apNextDraw = 0;
+  drawApSetup();
+  Serial.printf("[wifi] 저장: %s (다시 시작)\n", ssid.c_str());
+
+  String html;
+  html += "<!doctype html><html lang=\"ko\"><head><meta charset=\"utf-8\">";
+  html += "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">";
+  html += "<title>저장 완료</title><style>body{margin:0;padding:28px 20px;background:#0b0f14;";
+  html += "color:#e8eef5;font:16px/1.5 -apple-system,'Apple SD Gothic Neo','Malgun Gothic',sans-serif}";
+  html += "h1{font-size:20px}b{color:#5ee7ff}p{color:#9fb0c3}</style></head><body>";
+  html += "<h1>저장했습니다</h1><p><b>" + htmlEscape(ssid) + "</b> 에 연결을 시도합니다.</p>";
+  html += "<p>기기가 재시작되고 10~20초 뒤 화면을 확인하세요. 연결에 실패하면 ";
+  html += "다시 <b>StickS3-Setup</b> 이 나타납니다.</p></body></html>";
+  g_http.send(200, "text/html; charset=utf-8", html);
+
+  delay(2500);          // 응답이 휴대폰에 도착할 시간
+  ESP.restart();
+}
+
+static void apHandleForget() {
+  clearStoredWifi();
+  Serial.println("[wifi] 저장된 자격증명 삭제, 다시 시작");
+  g_http.send(200, "text/html; charset=utf-8",
+              "<!doctype html><meta charset=\"utf-8\"><p>저장된 설정을 지웠습니다. 기기를 재시작합니다.</p>");
+  delay(1500);
+  ESP.restart();
+}
+
+// 캡티브 포털: 어느 주소로 와도 설정 페이지로 보낸다 (Android/iOS 자동 팝업)
+static void apHandleNotFound() {
+  g_http.sendHeader("Location", "http://192.168.4.1/", false);
+  g_http.send(302, "text/plain", "");
+}
+
+[[noreturn]] static void enterApSetup() {
+  Serial.println("[wifi] AP 설정 모드 시작");
+  M5.Speaker.end();
+
+  WiFi.persistent(false);
+  WiFi.setAutoReconnect(false);
+  WiFi.mode(WIFI_AP_STA);        // AP 를 띄운 채 주변을 스캔하려면 STA 도 필요
+  WiFi.disconnect(false, false);
+  WiFi.setSleep(false);
+  WiFi.softAPConfig(AP_IP, AP_IP, AP_MASK);
+  if (!WiFi.softAP(AP_SSID, nullptr, 1, 0, 4)) {
+    bootScreen("AP 시작 실패");
+    delay(3000);
+    ESP.restart();
+  }
+  WiFi.softAPsetHostname("sticks3");
+
+  g_dns.start(53, "*", AP_IP);
+
+  g_http.on("/", HTTP_GET, apHandleRoot);
+  g_http.on("/scan", HTTP_GET, apHandleScan);
+  g_http.on("/save", HTTP_POST, apHandleSave);
+  g_http.on("/forget", HTTP_POST, apHandleForget);
+  g_http.on("/favicon.ico", HTTP_GET, []() { g_http.send(204); });
+  g_http.onNotFound(apHandleNotFound);
+  g_http.begin();
+
+  g_apClients = -1;
+  g_apNextDraw = 0;
+  for (;;) {
+    g_dns.processNextRequest();
+    g_http.handleClient();
+
+    int clients = WiFi.softAPgetStationNum();
+    if (clients != g_apClients) { g_apClients = clients; g_apNextDraw = 0; }
+    if ((int32_t)(millis() - g_apNextDraw) >= 0) {
+      g_apNextDraw = millis() + 500;
+      drawApSetup();
+    }
+    delay(2);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -839,6 +1249,17 @@ static void gemTick() {
 static void handleButtons() {
   const int pages = GEMINI_ENABLED ? 3 : 2;
 
+  // B 3초 길게 = Wi-Fi 설정 모드. 녹음·전송 중에는 무시한다.
+  static bool holdFired = false;
+  if (M5.BtnB.isPressed() && M5.BtnB.pressedFor(3000)) {
+    if (!holdFired && g_gem.state != G_WARMUP && g_gem.state != G_REC && g_gem.state != G_SEND) {
+      holdFired = true;
+      enterApSetup();                        // 돌아오지 않는다 (저장 후 재시작)
+    }
+  } else if (!M5.BtnB.isPressed()) {
+    holdFired = false;
+  }
+
   if (M5.BtnA.wasClicked()) {
     if (g_gem.state == G_REC || g_gem.state == G_WARMUP) {
       // 녹음 중 실수 방지: 페이지 이동 무시
@@ -880,11 +1301,14 @@ void setup() {
   M5.Speaker.end();
 
   bootScreen("시작 중…");
-  if (!wifiConnect()) {
-    g_data.error = "Wi-Fi 연결 실패";
-  } else {
-    fetchStatus();
+
+  // 순서: 휴대폰 설정값(NVS) → config.h → 둘 다 없거나 실패하면 AP 설정 모드
+  if (!resolveWifi() || !wifiConnect(WIFI_BOOT_TIMEOUT)) {
+    g_data.error = "Wi-Fi 설정 필요";
+    enterApSetup();            // 재시작 전까지 돌아오지 않는다
   }
+
+  fetchStatus();
   g_nextFetchAt = millis() + STATUS_REFRESH_MS;
   draw();
 }
