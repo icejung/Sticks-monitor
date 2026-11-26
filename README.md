@@ -3,17 +3,20 @@
 M5Stack **StickS3**(ESP32-S3-PICO-1-N8R8, 1.14" 135×240 LCD) 한 대로 만드는 책상 위 미니 대시보드입니다.
 집 네트워크에 붙여 두면 5분마다 GitHub의 `status.json`을 받아 **날씨·짧은 메모·관심 종목 시세**를 보여 주고,
 3페이지에서는 **버튼 한 번으로 말해서 Gemini 무료 등급에 물어보는 음성 Q&A**를 쓸 수 있습니다.
+답은 화면에 2~3줄로 뜨고, 같은 내용을 **내장 스피커가 소리내어 읽어 줍니다**(A/B 로 중단).
 
 - 시세/날씨를 고치려면 **GitHub에서 `status.json`만 편집**하면 됩니다. 기기를 다시 굽지 않아도 5분 안에 반영됩니다.
 - **Wi-Fi 는 휴대폰에서 설정**합니다. 기기를 켜면 `StickS3-Setup` 이라는 AP 가 열리고, 폰으로 접속해 집 Wi-Fi 를 고르면 끝입니다.
   코드에 비밀번호를 넣고 다시 굽는 일이 없습니다.
 - 공개 저장소의 `status.json`을 HTTPS로 그냥 읽으므로 **기기에 GitHub 토큰을 넣지 않습니다.**
 - Gemini는 **무료 등급**(신용카드 등록 불필요)만 사용합니다.
+- 스피커 음성(TTS)은 **덤**입니다. 무료 한도 초과나 네트워크 오류가 나면 화면의 텍스트 답변만 남고 조용히 텍스트 전용으로 동작합니다.
 
 ```
 Page 1  날씨 + 메모        ← status.json
 Page 2  시세 3종           ← status.json
-Page 3  Gemini 음성 질문   ← 마이크 → WAV → generateContent
+Page 3  Gemini 음성 질문   ← 마이크 → WAV → generateContent → 화면 표시
+                             └ 답변 텍스트 → Gemini TTS → 내장 스피커
 ```
 
 ---
@@ -67,6 +70,10 @@ cp include/config.example.h include/config.h      # Windows: copy
 | `GEMINI_MODEL` | `gemini-3.5-flash-lite` | 무료 등급 모델명 |
 | `GEMINI_RECORD_SEC` | 5 | 한 번에 녹음하는 길이(초) |
 | `GEMINI_ENABLED` | 1 | 0이면 Gemini 페이지를 숨긴다 |
+| `GEMINI_TTS_ENABLED` | 1 | 0이면 스피커 음성 출력 없이 텍스트만 |
+| `GEMINI_TTS_MODEL` | `gemini-2.5-flash-preview-tts` | 음성 합성 모델(AUDIO 출력 지원) |
+| `GEMINI_TTS_VOICE` | `Kore` | 목소리 이름 |
+| `SPEAKER_VOLUME` | 180 | 0~255. 배터리 사용 시 75%(≈191) 이하 권장 |
 
 ## 4. Wi-Fi 설정 (휴대폰에서)
 
@@ -104,15 +111,17 @@ VS Code에서는 하단 상태바의 **→(Upload)** 버튼을 누르면 됩니�
 
 | 버튼 | 1·2페이지 | 3페이지 |
 | --- | --- | --- |
-| **A** (작은 버튼, GPIO11) | 다음 페이지 | 다음 페이지 |
-| **B** (작은 버튼, GPIO12) | `status.json` 즉시 새로고침 | **눌러서 말하기** / 녹음 중이면 그만 |
-| **B 3초 길게** | Wi-Fi 설정 모드(AP) | Wi-Fi 설정 모드(AP) — 녹음·전송 중에는 무시 |
+| **A** (작은 버튼, GPIO11) | 다음 페이지 | 다음 페이지 / **재생 중이면 중단** |
+| **B** (작은 버튼, GPIO12) | `status.json` 즉시 새로고침 | **눌러서 말하기** / 녹음 중이면 그만 / **재생 중이면 중단** |
+| **B 3초 길게** | Wi-Fi 설정 모드(AP) | Wi-Fi 설정 모드(AP) — 녹음·전송·재생 중에는 무시 |
 
 - 전원 버튼: 한 번 누르면 켜기/리셋, 두 번 누르면 끄기.
 - **1페이지**: 도시, 현재 기온(큰 글씨), 날씨 상태, 최고/최저, 습도, 미세먼지 등급, 그리고 `note` 한 줄.
 - **2페이지**: 종목명 / 가격 / 등락률. 상승은 빨강, 하락은 파랑(국내 관행).
 - **3페이지**: B를 누르면 1.2초 마이크 예열 후 **5초 녹음** → Gemini에 보내고 답을 2~3줄로 표시.
-  답이 길면 2.5초마다 자동으로 넘어갑니다. 다시 묻고 싶으면 B를 한 번 더 누르세요.
+  조금 뒤 같은 답을 **내장 스피커로 읽어 줍니다**(`SPEAKER_VOLUME`).  
+  답이 길면 2.5초마다 화면이 자동으로 넘어가고, **재생 중 A 또는 B를 누르면 소리가 바로 멈춥니다**.  
+  음성 합성은 덤이라 무료 한도 초과·오류가 나면 소리 없이 텍스트만 남습니다. 다시 묻고 싶으면 B를 한 번 더 누르세요.
 - 오른쪽 위에 배터리 잔량(%)과 아이콘이 항상 표시됩니다.
 
 ## 7. status.json 갱신하기
@@ -182,9 +191,17 @@ GitHub 웹에서 이 파일을 열어 **연필 아이콘(Edit)** → 값 수정 
 3. `POST https://generativelanguage.googleapis.com/v1beta/models/{모델}:generateContent?key={키}` 한 번,
    본문에 `inline_data` (`mime_type: "audio/wav"`) + "2~3줄로 짧게 답해라"는 지시문을 함께 전송
 4. 응답 JSON에서 `candidates[0].content.parts[].text`만 골라(사고 과정 파트는 제외) 화면에 표시
+5. 같은 텍스트를 TTS 모델(`GEMINI_TTS_MODEL`)에 한 번 더 보내
+   (`responseModalities: ["AUDIO"]`, `prebuiltVoiceConfig.voiceName`)
+6. 응답 `inlineData.data`(base64)를 PSRAM 으로 받아 디코딩 → 16bit 모노 24kHz PCM
+7. `M5.Speaker.setVolume(SPEAKER_VOLUME)` 후 `playRaw(...)` 로 재생, 끝나면 `M5.Speaker.end()`
 
-> ES8311은 스피커와 마이크를 동시에 쓸 수 없습니다. 그래서 녹음 전에 `M5.Speaker.end()`를 호출하고,
-> 마이크 예열(약 1.2초, 이 시간 동안 샘플이 0으로 들어올 수 있음) 뒤에 녹음을 시작합니다.
+> 음성 합성은 **부가 기능**입니다. 무료 한도(429)·네트워크·파싱 오류가 나면 오류 화면 대신
+> 텍스트 답변을 그대로 두고 조용히 텍스트 전용으로 동작합니다.
+> 응답이 수백 KB~수 MB 라서 응답 버퍼와 PCM 모두 **PSRAM**에 잡고 재생이 끝나면 해제합니다.
+
+> ES8311은 스피커와 마이크를 동시에 쓸 수 없습니다. 그래서 녹음 전에 `M5.Speaker.end()` 를,
+> 재생 전에 `M5.Mic.end()` 를 호출하고, 마이크 예열(약 1.2초, 이 시간 동안 샘플이 0으로 들어올 수 있음) 뒤에 녹음을 시작합니다.
 
 ## 9. 문제 해결
 
@@ -203,6 +220,8 @@ GitHub 웹에서 이 파일을 열어 **연필 아이콘(Edit)** → 값 수정 
 | `HTTP 403 (키/권한)` | 키 오타, 또는 해당 모델이 무료 등급에서 제공되지 않음 |
 | `HTTP 429 (무료 한도)` | 무료 등급 요청 한도 초과. 잠시 대기 |
 | 마이크가 무음 | 마이크 구멍을 가리지 않았는지, 예열 시간(`GEMINI_MIC_WARMUP_MS`)을 늘려 보기 |
+| 답은 나오는데 소리가 없다 | `SPEAKER_VOLUME`(0~255) 확인, `GEMINI_TTS_ENABLED 1` 확인, TTS 무료 한도(429) 여부는 시리얼 로그의 `[tts]` 줄로 확인 |
+| 소리가 끊기거나 기기가 재부팅된다 | 배터리 사용 시 볼륨을 70%(180) 이하로. USB 연결이면 더 키워도 된다 |
 | 업로드 실패 | 전원 버튼 길게 눌러 초록 LED 깜빡임 = 다운로드 모드에서 재시도 |
 
 ## 10. 파일 구조
@@ -210,7 +229,7 @@ GitHub 웹에서 이 파일을 열어 **연필 아이콘(Edit)** → 값 수정 
 ```
 platformio.ini              # StickS3용 빌드 설정 (8MB Flash / OPI PSRAM)
 include/config.example.h    # 설정 템플릿 → config.h 로 복사
-src/main.cpp                # 화면·status.json·Gemini·Wi-Fi 설정 포털 전체 구현
+src/main.cpp                # 화면·status.json·Gemini(음성 질문/음성 출력)·Wi-Fi 설정 포털 전체 구현
 status.json                 # 기기가 읽는 데이터 (공개 정보만)
 README.md
 ```

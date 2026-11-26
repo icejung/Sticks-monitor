@@ -57,3 +57,23 @@
 
 // 기능 끄기: 0으로 두면 Gemini 페이지를 숨기고 컴파일 크기도 줄어든다.
 #define GEMINI_ENABLED 1
+
+// -------- 3페이지 스피커 음성 출력 (Gemini TTS) --------
+// 답변 텍스트를 Gemini TTS 로 합성해 StickS3 내장 스피커로 읽어 준다.
+// 음성 합성이 실패(무료 한도 초과·네트워크 오류)해도 화면의 텍스트 답변은 그대로 남고
+// 조용히 텍스트 전용으로 동작한다. 끄려면 0.
+#define GEMINI_TTS_ENABLED 1
+
+// 오디오 출력(responseModalities: ["AUDIO"])을 지원하는 TTS 모델.
+// 응답은 base64 로 인코딩된 16bit 모노 24kHz PCM 이다.
+#define GEMINI_TTS_MODEL "gemini-2.5-flash-preview-tts"
+
+// 목소리 이름. Kore(한국어, 차분한 톤) 외에 Puck·Charon·Fenrir·Aoede 등이 있다.
+#define GEMINI_TTS_VOICE "Kore"
+
+// 스피커 볼륨 0~255. StickS3 공식 안내: 배터리로 쓸 때는 75%(≈191) 이하를 권장한다
+// (과전류로 기기가 재부팅될 수 있음). 180 ≈ 70%.
+#define SPEAKER_VOLUME 180
+
+// TTS 출력 기본 샘플레이트. 응답 mimeType 에 rate= 값이 있으면 그 값을 우선한다.
+#define GEMINI_TTS_SR 24000

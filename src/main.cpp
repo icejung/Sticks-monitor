@@ -4,14 +4,17 @@
 //    Page 1 : 날씨 + 짧은 메모          ← GitHub status.json (5분마다 갱신)
 //    Page 2 : 시세 (삼성전자 / XRP / KODEX) ← GitHub status.json
 //    Page 3 : Gemini 무료 등급 음성 Q&A  ← 마이크 녹음 → WAV → generateContent
+//             └ 답변 텍스트를 Gemini TTS 로 합성해 내장 스피커로 읽어 준다
+//               (재생 중 A/B 를 누르면 즉시 중단, 실패하면 조용히 텍스트만)
 //
 //  하드웨어: M5Stack StickS3 (ESP32-S3-PICO-1-N8R8, 8MB Flash + 8MB OPI PSRAM)
 //            1.14" ST7789P3 135x240 LCD, ES8311 코덱 + MEMS 마이크
 //            버튼 A = GPIO11, 버튼 B = GPIO12, 250mAh 배터리(M5PM1 PMIC)
 //
 //  버튼
-//    A (짧게)   : 다음 페이지
+//    A (짧게)   : 다음 페이지 (3페이지 음성 재생 중이면 재생 중단)
 //    B (짧게)   : 1·2페이지 = status.json 새로고침 / 3페이지 = 녹음 시작·중지
+//                 3페이지 음성 재생 중이면 재생 중단
 //    B (3초 길게): Wi-Fi 설정 모드 (AP "StickS3-Setup" + 192.168.4.1)
 //
 //  Wi-Fi 설정
@@ -85,6 +88,24 @@ using namespace lgfx::textdatum;
     "첨부한 한국어 음성 질문을 듣고 한국어로 답해라. 2~3줄, 60자 이내, 평문으로 핵심만."
 #endif
 
+// ----- 3페이지 스피커 음성 출력 (Gemini TTS) -----
+#ifndef GEMINI_TTS_ENABLED
+  #define GEMINI_TTS_ENABLED 1
+#endif
+#ifndef GEMINI_TTS_MODEL
+  #define GEMINI_TTS_MODEL "gemini-2.5-flash-preview-tts"
+#endif
+#ifndef GEMINI_TTS_VOICE
+  #define GEMINI_TTS_VOICE "Kore"
+#endif
+#ifndef GEMINI_TTS_SR
+  #define GEMINI_TTS_SR 24000        // Gemini TTS 기본 출력: 16bit mono 24kHz
+#endif
+#ifndef SPEAKER_VOLUME
+  // 0~255. StickS3 공식 안내: 배터리 구동 시 과전류로 재부팅될 수 있어 75%(≈191) 이하 권장 → 180 ≈ 70%
+  #define SPEAKER_VOLUME 180
+#endif
+
 // ---------------------------------------------------------------------------
 //  화면 기본값
 // ---------------------------------------------------------------------------
@@ -140,7 +161,9 @@ static bool g_needDraw = true;
 static uint32_t g_lastDrawAt = 0;
 
 // Gemini 상태
-enum GemState : uint8_t { G_IDLE, G_WARMUP, G_REC, G_SEND, G_ANSWER, G_ERROR };
+//   G_TTS   : 답변 텍스트는 표시된 채로 스피커용 음성을 받아오는 중 (블로킹 HTTP)
+//   G_SPEAK : 받은 PCM 을 스피커로 재생 중 (A/B 로 중단 가능)
+enum GemState : uint8_t { G_IDLE, G_WARMUP, G_REC, G_SEND, G_ANSWER, G_TTS, G_SPEAK, G_ERROR };
 struct Gemini {
   GemState state = G_IDLE;
   uint32_t t0 = 0;
@@ -149,13 +172,28 @@ struct Gemini {
   String   err;
   int      scroll = 0;
   uint32_t scrollAt = 0;
+  uint32_t speakAt = 0;      // 재생 시작 시각
+  uint32_t speakMs = 0;      // 예상 재생 길이 + 여유 (안전장치)
 };
 static Gemini g_gem;
 
 static constexpr size_t   GEM_SR = 16000;
 static int16_t* g_micBuf = nullptr;   // PSRAM: WAV 헤더(44) + PCM
-static char*    g_body   = nullptr;   // PSRAM: HTTPS 요청 본문
+static char*    g_body   = nullptr;   // PSRAM: HTTPS 요청 본문 (음성 질문 / TTS 요청 공용)
 static size_t   g_bodyCap = 0;
+
+// TTS 버퍼 (수백 KB ~ 수 MB). 반드시 PSRAM 에 잡고 재생이 끝나면 해제한다.
+static char*    g_ttsResp    = nullptr;   // PSRAM: TTS 응답 JSON
+static size_t   g_ttsRespCap = 0;
+static int16_t* g_ttsPcm     = nullptr;   // PSRAM: 디코딩한 PCM (재생 중 유지)
+static uint32_t g_ttsRate    = GEMINI_TTS_SR;
+
+// 스피커 음성 절(아래)에서 정의 — 앞쪽 함수들이 쓰므로 미리 선언해 둔다.
+static bool gemTtsFetch();
+static void gemStopSpeak();
+#if GEMINI_TTS_ENABLED
+static void gemTtsFreePcm();
+#endif
 
 static lgfx::LGFX_Sprite  g_spr(&M5.Display);
 static lgfx::LGFXBase*    g_ui = &M5.Display;
@@ -258,7 +296,10 @@ static const char* pageTitle(int p) {
   switch (p) {
     case 0: return "날씨";
     case 1: return "시세";
-    default: return "Gemini";
+    default:
+      if (g_gem.state == G_SPEAK) return "Gemini 음성 재생";
+      if (g_gem.state == G_TTS)   return "Gemini 음성 준비";
+      return "Gemini";
   }
 }
 
@@ -414,7 +455,9 @@ static void drawGeminiPage() {
       break;
     }
 
-    case G_ANSWER: {
+    case G_ANSWER:
+    case G_TTS:        // 음성을 받아오는 동안에도 답변 텍스트는 그대로 보여준다
+    case G_SPEAK: {    // 재생 중에도 마찬가지
       g_ui->setFont(&fonts::efontKR_12);
       std::vector<String> lines;
       wrapText(g_gem.text, maxW, lines);
@@ -474,7 +517,10 @@ static void draw() {
       break;
     default:
       drawGeminiPage();
-      hint = (g_gem.state == G_REC) ? "B 그만    A 다음" : "B 말하기    A 다음";
+      if (g_gem.state == G_REC)        hint = "B 그만    A 다음";
+      else if (g_gem.state == G_TTS)   hint = "음성 준비 중…";
+      else if (g_gem.state == G_SPEAK) hint = "A/B 재생 중단";
+      else                             hint = "B 말하기    A 다음";
       break;
   }
   // Wi-Fi 가 죽어 있으면 버튼 안내를 설정 모드 안내로 바꾼다
@@ -1095,7 +1141,11 @@ static void gemStart() {
   if (!wifiConnect()) { gemFail("Wi-Fi 연결 실패"); return; }
 
   // ES8311 코덱은 스피커와 마이크를 동시에 쓸 수 없다 → 스피커를 먼저 내린다.
+  M5.Speaker.stop();
   M5.Speaker.end();
+#if GEMINI_TTS_ENABLED
+  gemTtsFreePcm();          // 남아 있는 음성 버퍼 정리
+#endif
   delay(30);
 
   if (!M5.Mic.begin() || !M5.Mic.isEnabled()) {
@@ -1204,6 +1254,305 @@ static void gemSend() {
   g_gem.scroll = 0;
   g_gem.scrollAt = millis();
   g_needDraw = true;
+  draw();                       // 텍스트 답변을 먼저 띄운다
+
+#if GEMINI_TTS_ENABLED
+  // 음성은 덤이다. 무료 한도(429)·네트워크·파싱 오류가 나면 화면의 텍스트만 남기고
+  // 조용히 텍스트 전용 모드로 동작한다(오류 화면으로 바꾸지 않는다).
+  g_gem.state = G_TTS;
+  g_needDraw = true;
+  draw();                       // 답변 + "음성 준비 중…" 힌트
+  if (!gemTtsFetch()) {
+    Serial.println("[tts] 음성 생략 — 텍스트 전용으로 계속");
+    g_gem.state = G_ANSWER;
+    g_needDraw = true;
+  }
+#endif
+}
+
+// ---------------------------------------------------------------------------
+//  스피커 음성 출력 (Gemini TTS)
+//    답변 텍스트 → generateContent(responseModalities AUDIO) → base64 PCM
+//    → PSRAM 디코딩 → M5.Speaker.playRaw(24kHz mono). 재생 중 A/B 로 중단.
+//    ES8311 코덱은 마이크와 공유하므로, 재생 뒤에는 반드시 M5.Speaker.end().
+// ---------------------------------------------------------------------------
+#if GEMINI_TTS_ENABLED
+static constexpr size_t GEM_TTS_MAX_RESP = 3UL * 1024UL * 1024UL;   // 응답 JSON 상한
+
+static void* psAlloc(size_t n) {
+  void* p = ps_malloc(n);
+  if (!p) p = heap_caps_malloc(n, MALLOC_CAP_8BIT);
+  return p;
+}
+
+static void gemTtsFreePcm() {
+  if (g_ttsPcm) { free(g_ttsPcm); g_ttsPcm = nullptr; }
+}
+
+static void gemTtsFreeResp() {
+  if (g_ttsResp) { free(g_ttsResp); g_ttsResp = nullptr; g_ttsRespCap = 0; }
+}
+
+static int b64Value(char c) {
+  if (c >= 'A' && c <= 'Z') return c - 'A';
+  if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+  if (c >= '0' && c <= '9') return c - '0' + 52;
+  if (c == '+') return 62;
+  if (c == '/') return 63;
+  return -1;                      // '=' 와 공백·개행은 건너뛴다
+}
+
+// base64 → 바이트. 반환: 디코딩한 바이트 수 (0 = 실패)
+static size_t b64Decode(const char* src, uint8_t* dst, size_t dstCap) {
+  uint32_t acc = 0;
+  int bits = 0;
+  size_t o = 0;
+  for (const char* p = src; *p; ++p) {
+    if (*p == '=') break;
+    int v = b64Value(*p);
+    if (v < 0) continue;
+    acc = (acc << 6) | (uint32_t)v;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      if (o >= dstCap) return 0;
+      dst[o++] = (uint8_t)((acc >> bits) & 0xFF);
+    }
+  }
+  return o;
+}
+
+// 응답 mimeType 의 rate=24000 같은 값을 실제 샘플레이트로 쓴다
+static uint32_t ttsRateFromMime(const char* mime) {
+  if (!mime) return GEMINI_TTS_SR;
+  const char* r = strstr(mime, "rate=");
+  if (!r) return GEMINI_TTS_SR;
+  long v = strtol(r + 5, nullptr, 10);
+  if (v < 8000 || v > 48000) return GEMINI_TTS_SR;
+  return (uint32_t)v;
+}
+
+static bool gemSpeakStart(int16_t* pcm, size_t samples, uint32_t rate);
+
+// HTTPClient 응답 본문을 PSRAM 버퍼로 바로 받아 쓰는 싱크.
+// getStreamPtr() 로 직접 읽으면 chunked 응답의 "1a2b\r\n" 머리가 섞이므로
+// HTTPClient 자신의 writeToStream() 에 통과시킨다(identity/chunked 둘 다 처리).
+class TtsSink : public Stream {
+ public:
+  TtsSink(char* buf, size_t cap) : _buf(buf), _cap(cap) {}
+  size_t length() const { return _len; }
+  bool   truncated() const { return _cut; }
+
+  size_t write(uint8_t c) override { return write(&c, 1); }
+  size_t write(const uint8_t* data, size_t len) override {
+    size_t room = (_cap > _len) ? (_cap - _len) : 0;
+    size_t n = (len < room) ? len : room;
+    if (n) { memcpy(_buf + _len, data, n); _len += n; }
+    if (n < len) _cut = true;
+    return len;                 // 초과분은 버려도 스트림에는 다 쓴 것으로 알린다
+  }
+  int available() override { return 0; }
+  int read() override { return -1; }
+  int peek() override { return -1; }
+  void flush() override {}
+
+ private:
+  char*  _buf;
+  size_t _cap;
+  size_t _len = 0;
+  bool   _cut = false;
+};
+
+static bool gemTtsFetch() {
+  if (!g_gem.text.length()) return false;
+  if (!g_body || !g_bodyCap) return false;
+  if (strlen(GEMINI_API_KEY) < 10 || sameText(GEMINI_API_KEY, "YOUR_GEMINI_API_KEY")) return false;
+
+  // ES8311 을 마이크가 잡고 있으면 먼저 놓아준다.
+  if (M5.Mic.isEnabled()) { M5.Mic.end(); delay(30); }
+
+  // 요청 본문 (작다 — 음성 질문 전송이 끝난 g_body 를 다시 쓴다)
+  JsonDocument req;
+  req["contents"][0]["parts"][0]["text"] = g_gem.text;
+  JsonObject gen = req["generationConfig"].to<JsonObject>();
+  JsonArray mods = gen["responseModalities"].to<JsonArray>();
+  mods.add("AUDIO");
+  gen["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] = GEMINI_TTS_VOICE;
+  size_t bodyLen = serializeJson(req, g_body, g_bodyCap);
+  if (!bodyLen || bodyLen >= g_bodyCap) {
+    Serial.println("[tts] 요청 본문 생성 실패");
+    return false;
+  }
+
+  char url[256];
+  snprintf(url, sizeof(url),
+           "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s",
+           GEMINI_TTS_MODEL, GEMINI_API_KEY);
+
+  WiFiClientSecure client;
+  client.setInsecure();          // 음성 질문과 동일하게 인증서 검증은 생략
+  client.setHandshakeTimeout(15);
+
+  HTTPClient http;
+  http.setConnectTimeout(10000);
+  http.setTimeout(45000);
+  http.setUserAgent("StickS3-Monitor/1.0");
+
+  if (!http.begin(client, url)) {
+    Serial.println("[tts] 요청 생성 실패");
+    return false;
+  }
+  http.addHeader("Content-Type", "application/json");
+
+  int code = http.POST((uint8_t*)g_body, bodyLen);
+  if (code != 200) {
+    Serial.printf("[tts] HTTP %d — 텍스트만 표시\n", code);
+    http.end();
+    client.stop();
+    return false;
+  }
+
+  // 응답은 base64 PCM 이라 수백 KB~수 MB. String 으로 받으면 힙이 버티지 못하므로
+  // Content-Length 만큼 PSRAM 에 직접 받는다(모자라면 위 GEM_TTS_MAX_RESP 까지).
+  int clen = http.getSize();
+  size_t cap = (clen > 0) ? (size_t)clen + 1 : GEM_TTS_MAX_RESP;
+  if (cap > GEM_TTS_MAX_RESP) {
+    Serial.printf("[tts] 응답이 너무 큼 (%d bytes)\n", clen);
+    http.end();
+    client.stop();
+    return false;
+  }
+
+  gemTtsFreeResp();
+  g_ttsResp = (char*)psAlloc(cap);
+  if (!g_ttsResp) {
+    Serial.println("[tts] PSRAM 할당 실패 (응답)");
+    http.end();
+    client.stop();
+    return false;
+  }
+  g_ttsRespCap = cap;
+
+  TtsSink sink(g_ttsResp, cap - 1);          // 마지막 1바이트는 '\0' 자리로 남긴다
+  int wret = http.writeToStream(&sink);      // chunked/identity 모두 처리하고 끝나면 끊는다
+  size_t got = sink.length();
+  g_ttsResp[got] = '\0';
+  http.end();
+  client.stop();
+
+  if (wret < 0) {
+    Serial.printf("[tts] 응답 수신 실패 (%d)\n", wret);
+    gemTtsFreeResp();
+    return false;
+  }
+  if (sink.truncated()) {
+    Serial.println("[tts] 응답이 버퍼보다 큼 — 텍스트만 표시");
+    gemTtsFreeResp();
+    return false;
+  }
+  if (got == 0) {
+    Serial.println("[tts] 빈 응답");
+    gemTtsFreeResp();
+    return false;
+  }
+
+  // 응답 JSON → inlineData.data (base64). 버퍼가 mutable 이라 문자열은 복사 없이 참조된다.
+  const char* b64 = nullptr;
+  const char* mime = nullptr;
+  JsonDocument doc;
+  DeserializationError jerr = deserializeJson(doc, g_ttsResp, got);
+  if (jerr) {
+    Serial.printf("[tts] 응답 해석 실패: %s\n", jerr.c_str());
+  } else {
+    JsonArray parts = doc["candidates"][0]["content"]["parts"];
+    for (JsonVariant p : parts) {
+      const char* d = p["inlineData"]["data"] | "";
+      const char* m = p["inlineData"]["mimeType"] | "";
+      if (!*d) {
+        d = p["inline_data"]["data"] | "";
+        m = p["inline_data"]["mime_type"] | "";
+      }
+      if (*d) { b64 = d; mime = m; break; }
+    }
+    if (!b64) {
+      const char* fr = doc["candidates"][0]["finishReason"] | "";
+      const char* em = doc["error"]["message"] | "";
+      if (*em)          Serial.printf("[tts] API 오류: %s\n", em);
+      else if (*fr)     Serial.printf("[tts] 오디오 없음 (finishReason %s)\n", fr);
+      else              Serial.println("[tts] 응답에 inlineData 없음");
+    }
+  }
+
+  // base64 → PCM (PSRAM)
+  size_t b64Len = b64 ? strlen(b64) : 0;
+  uint8_t* raw = nullptr;
+  size_t rawLen = 0;
+  uint32_t rate = ttsRateFromMime(mime);
+  if (b64Len >= 8) {
+    size_t pcmCap = b64Len / 4 * 3 + 4;
+    raw = (uint8_t*)psAlloc(pcmCap);
+    if (raw) {
+      rawLen = b64Decode(b64, raw, pcmCap);
+      // 일부 TTS 모델은 WAV(44바이트 RIFF 헤더)로 준다 → 헤더를 건너뛴다
+      if (rawLen > 44 && memcmp(raw, "RIFF", 4) == 0) {
+        memmove(raw, raw + 44, rawLen - 44);
+        rawLen -= 44;
+      }
+      rawLen &= ~(size_t)1;                 // 홀수 바이트(잘린 샘플)는 버린다
+      if (rawLen < 2) { free(raw); raw = nullptr; rawLen = 0; }
+    } else {
+      Serial.println("[tts] PSRAM 할당 실패 (PCM)");
+    }
+  }
+  gemTtsFreeResp();                          // PCM 을 따로 잡은 뒤 응답 버퍼는 놓는다
+
+  if (!raw) return false;
+  return gemSpeakStart((int16_t*)raw, rawLen / 2, rate);
+}
+
+// PCM 을 스피커로 재생 시작. 성공하면 버퍼 소유권은 g_ttsPcm 으로 넘어간다.
+static bool gemSpeakStart(int16_t* pcm, size_t samples, uint32_t rate) {
+  g_ttsPcm = pcm;
+  g_ttsRate = rate ? rate : GEMINI_TTS_SR;
+
+  if (!M5.Speaker.begin()) {
+    Serial.println("[tts] 스피커 시작 실패");
+    gemTtsFreePcm();
+    return false;
+  }
+  delay(800);                 // StickS3 공식 안내: 코덱 안정화 대기(앞부분 유실 방지, 약 1초)
+  M5.Speaker.setVolume((uint8_t)SPEAKER_VOLUME);
+
+  if (!M5.Speaker.playRaw(g_ttsPcm, samples, g_ttsRate, false)) {
+    Serial.println("[tts] 재생 큐 실패");
+    M5.Speaker.end();
+    gemTtsFreePcm();
+    return false;
+  }
+
+  g_gem.speakAt = millis();
+  g_gem.speakMs = (uint32_t)((uint64_t)samples * 1000ULL / g_ttsRate) + 4000;   // 여유 4초
+  g_gem.state = G_SPEAK;
+  g_needDraw = true;
+  Serial.printf("[tts] 재생 %u samples @ %uHz (%u ms)\n", (unsigned)samples,
+                (unsigned)g_ttsRate, (unsigned)g_gem.speakMs);
+  return true;
+}
+#else
+static bool gemTtsFetch() { return false; }
+#endif  // GEMINI_TTS_ENABLED
+
+// 재생 중단·정리. 버퍼는 스피커 태스크가 끝난 뒤에 해제한다.
+static void gemStopSpeak() {
+  M5.Speaker.stop();
+  M5.Speaker.end();
+#if GEMINI_TTS_ENABLED
+  gemTtsFreePcm();
+#endif
+  if (g_gem.state == G_SPEAK || g_gem.state == G_TTS) {
+    g_gem.state = G_ANSWER;
+    g_needDraw = true;
+  }
 }
 
 static void gemTick() {
@@ -1238,6 +1587,14 @@ static void gemTick() {
       if (g_needDraw) draw();
       break;
 
+    case G_SPEAK:
+      // 재생이 끝났거나(예상 길이 초과) 중단되면 정리하고 답변 화면으로 돌아간다.
+      if (!M5.Speaker.isPlaying() || millis() - g_gem.speakAt > g_gem.speakMs) {
+        gemStopSpeak();
+        draw();
+      }
+      break;
+
     default:
       break;
   }
@@ -1249,10 +1606,11 @@ static void gemTick() {
 static void handleButtons() {
   const int pages = GEMINI_ENABLED ? 3 : 2;
 
-  // B 3초 길게 = Wi-Fi 설정 모드. 녹음·전송 중에는 무시한다.
+  // B 3초 길게 = Wi-Fi 설정 모드. 녹음·전송·음성 재생 중에는 무시한다.
   static bool holdFired = false;
   if (M5.BtnB.isPressed() && M5.BtnB.pressedFor(3000)) {
-    if (!holdFired && g_gem.state != G_WARMUP && g_gem.state != G_REC && g_gem.state != G_SEND) {
+    if (!holdFired && g_gem.state != G_WARMUP && g_gem.state != G_REC &&
+        g_gem.state != G_SEND && g_gem.state != G_TTS && g_gem.state != G_SPEAK) {
       holdFired = true;
       enterApSetup();                        // 돌아오지 않는다 (저장 후 재시작)
     }
@@ -1261,7 +1619,9 @@ static void handleButtons() {
   }
 
   if (M5.BtnA.wasClicked()) {
-    if (g_gem.state == G_REC || g_gem.state == G_WARMUP) {
+    if (g_gem.state == G_SPEAK) {
+      gemStopSpeak();                        // 재생 중이면 A 도 즉시 중단
+    } else if (g_gem.state == G_REC || g_gem.state == G_WARMUP) {
       // 녹음 중 실수 방지: 페이지 이동 무시
     } else {
       g_page = (g_page + 1) % pages;
@@ -1270,10 +1630,12 @@ static void handleButtons() {
   }
 
   if (M5.BtnB.wasClicked()) {
-    if (g_gem.state == G_REC) {
+    if (g_gem.state == G_SPEAK) {
+      gemStopSpeak();                        // 재생 중이면 B 도 즉시 중단
+    } else if (g_gem.state == G_REC) {
       gemStopRec();
     } else if (g_page == 2) {
-      if (g_gem.state != G_WARMUP && g_gem.state != G_SEND) gemStart();
+      if (g_gem.state != G_WARMUP && g_gem.state != G_SEND && g_gem.state != G_TTS) gemStart();
     } else {
       g_nextFetchAt = 0;      // 다음 loop 에서 새로고침
     }
@@ -1297,7 +1659,7 @@ void setup() {
   g_spriteOk = (g_spr.createSprite(W, H) != nullptr);
   g_ui = g_spriteOk ? (lgfx::LGFXBase*)&g_spr : (lgfx::LGFXBase*)&M5.Display;
 
-  // 스피커는 이 프로젝트에서 쓰지 않는다 (마이크와 ES8311 공유)
+  // 스피커는 기본으로 내려 둔다 (마이크와 ES8311 공유). 3페이지 답변을 읽어 줄 때만 올린다.
   M5.Speaker.end();
 
   bootScreen("시작 중…");
@@ -1337,3 +1699,4 @@ void loop() {
   }
   delay(10);
 }
+
