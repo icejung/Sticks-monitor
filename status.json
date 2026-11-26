@@ -1,35 +1,35 @@
 {
-  "updated": "11-26 06:47",
-  "note": "목요일 아침 · 삼성전자 -9.9% 급락(코스피 -6.16%), 간밤 미 증시 혼조",
+  "updated": "11-27 06:46",
+  "note": "금요일 아침 · 삼성전자 +0.35% 반등, 코스피 +0.29% · 미 증시 추수감사절 휴장",
   "weather": {
     "city": "부천",
-    "condition": "맑음",
-    "temp": 6,
-    "high": 15,
-    "low": 6,
-    "humidity": 85,
+    "condition": "대체로 맑음",
+    "temp": 9,
+    "high": 16,
+    "low": 8,
+    "humidity": 92,
     "air": "좋음"
   },
   "markets": [
     {
       "symbol": "005930",
       "name": "삼성전자",
-      "price": 170700,
-      "change": -9.87,
+      "price": 171300,
+      "change": 0.35,
       "currency": "KRW"
     },
     {
       "symbol": "XRP",
       "name": "리플 XRP",
-      "price": 0.9427,
-      "change": 2.47,
+      "price": 0.954,
+      "change": 1.49,
       "currency": "USD"
     },
     {
       "symbol": "0005A0",
       "name": "KODEX S&P500 OTM",
-      "price": 8180,
-      "change": -1.21,
+      "price": 8230,
+      "change": 0.61,
       "currency": "KRW"
     }
   ]
