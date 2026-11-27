@@ -1,35 +1,35 @@
 {
-  "updated": "11-27 06:46",
-  "note": "금요일 아침 · 삼성전자 +0.35% 반등, 코스피 +0.29% · 미 증시 추수감사절 휴장",
+  "updated": "11-28 06:52",
+  "note": "토요일 아침 · 삼성전자 +4.55% 급등 17만9,100원, 코스피 +4.34% 4,915 · 미 증시 반도체 반등(나스닥 +2.31%)",
   "weather": {
     "city": "부천",
-    "condition": "대체로 맑음",
-    "temp": 9,
-    "high": 16,
-    "low": 8,
-    "humidity": 92,
-    "air": "좋음"
+    "condition": "맑음",
+    "temp": 7,
+    "high": 9,
+    "low": 4,
+    "humidity": 76,
+    "air": "보통"
   },
   "markets": [
     {
       "symbol": "005930",
       "name": "삼성전자",
-      "price": 171300,
-      "change": 0.35,
+      "price": 179100,
+      "change": 4.55,
       "currency": "KRW"
     },
     {
       "symbol": "XRP",
       "name": "리플 XRP",
-      "price": 0.954,
-      "change": 1.49,
+      "price": 0.948,
+      "change": -0.57,
       "currency": "USD"
     },
     {
       "symbol": "0005A0",
       "name": "KODEX S&P500 OTM",
-      "price": 8230,
-      "change": 0.61,
+      "price": 8175,
+      "change": -0.67,
       "currency": "KRW"
     }
   ]
